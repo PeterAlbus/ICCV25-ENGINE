@@ -1,7 +1,9 @@
 import json
 import argparse
 from trainer import train
-
+import os
+os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
+os.environ['CUDA_VISIBLE_DEVICES'] = '1'
 
 def main():
     args = setup_parser().parse_args()

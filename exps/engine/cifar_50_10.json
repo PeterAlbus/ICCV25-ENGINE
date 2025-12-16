@@ -22,5 +22,8 @@
     "stat": 0.9,
     "sample_num": 0,
     "sample_noise": 0.25,
-    "rerank_top": 5
+    "rerank_top": 5,
+    "imbalance":true,
+    "longtail" :0.01,
+    "order": false
 }

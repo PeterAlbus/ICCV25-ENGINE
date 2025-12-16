@@ -39,7 +39,7 @@ def _train(args):
     _set_random()
     _set_device(args)
     print_args(args)
-    data_manager = DataManager(args["dataset"],args["shuffle"],args["seed"],args["init_cls"],args["increment"], )
+    data_manager = DataManager(args["dataset"],args["shuffle"],args["seed"],args["init_cls"],args["increment"], args)
     model = factory.get_model(args["model_name"], args)
     model.save_dir=logs_name
 

@@ -9,7 +9,7 @@ from utils.data import iCIFAR10, iCIFAR100, iImageNet100, iImageNet1000, iCIFAR2
 import json
 
 class DataManager(object):
-    def __init__(self, dataset_name, shuffle, seed, init_cls, increment):
+    def __init__(self, dataset_name, shuffle, seed, init_cls, increment, args):
 
         # load class to label name json file
         with open('./utils/labels.json', 'r') as f:
@@ -18,24 +18,55 @@ class DataManager(object):
         with open('./utils/templates.json', 'r') as f:
             self._data_to_prompt = json.load(f)[dataset_name]
         print(self._data_to_prompt)
-        
-        
+
+        self.args = args
         self.dataset_name = dataset_name
         self._setup_data(dataset_name, shuffle, seed)
-        # assert init_cls <= len(self._class_order), "No enough classes."
-        if init_cls > len(self._class_order):
-            print("No enough classes.")
-            self._increments=[len(self._class_order)]
-        else:
-            self._increments = [init_cls]
+        assert init_cls <= len(self._class_order), "No enough classes."
+        self._increments = [init_cls]
         while sum(self._increments) + increment < len(self._class_order):
             self._increments.append(increment)
         offset = len(self._class_order) - sum(self._increments)
         if offset > 0:
             self._increments.append(offset)
-        print('Training class stages:',self._increments )
-        
 
+        self.imbalance=args["imbalance"]
+        self.longtaillist=None
+        if self.imbalance is True:
+            longtail = args["longtail"]
+            print('Organizing Long-tailed Incremental Dataset')
+            if 'cifar' in dataset_name:
+                self.longtaillist=get_img_num_per_cls(500,100,'exp',float(longtail))
+            elif dataset_name == "imagenetr":
+                self.longtaillist = self.origin_num
+            elif dataset_name=='objectnet':
+                self.longtaillist=get_img_num_per_cls(200,200,'exp',float(longtail))
+            
+            
+            
+            if not args["order"]:
+                if 'cifar' in dataset_name:
+                    np.random.shuffle(self.longtaillist)
+                else:
+                    n_class = len(self._class_order)
+                    order_ = list(range(n_class)) 
+                    order2num = dict(zip(order_, self.longtaillist))
+                    np.random.shuffle(order_)
+                    new_order = [self._class_order[i] for i in order_]
+                    self._class_order = new_order
+                    logging.info("Imbalanced shuffle:")
+                    logging.info("new order:")
+                    logging.info(self._class_order)
+                    self.longtaillist = [order2num[i] for i in order_]
+                    self._train_targets = _map_new_class_index(
+                        self._train_targets, order_
+                    )
+                    self._test_targets = _map_new_class_index(self._test_targets, order_)
+
+            print('Long-tailed instance num:',self.longtaillist)
+            logging.info(self.longtaillist)
+
+            
     @property
     def nb_tasks(self):
         return len(self._increments)
@@ -46,9 +77,20 @@ class DataManager(object):
     def get_total_classnum(self):
         return len(self._class_order)
 
+    @property
+    def nb_classes(self):
+        return len(self._class_order)
+
     def get_dataset(
-        self, indices, source, mode, appendent=None, ret_data=False, m_rate=None
+        self, indices, source, mode, appendent=None, ret_data=False, m_rate=None, simplecil=False
     ):
+        
+        flag_lt = 0
+        if self.imbalance == 1 and ((mode == "train") or (mode=="test" and source=="train") or simplecil):
+            flag_lt = 1
+            logging.info(f"get long-tailed dataset : {self.imbalance} | {source} | {mode}")
+
+
         if source == "train":
             x, y = self._train_data, self._train_targets
         elif source == "test":
@@ -81,8 +123,16 @@ class DataManager(object):
                 class_data, class_targets = self._select_rmm(
                     x, y, low_range=idx, high_range=idx + 1, m_rate=m_rate
                 )
-            data.append(class_data)
-            targets.append(class_targets)
+            # * get imbalanced dataset
+            if flag_lt:
+                assert class_data.shape[0] >= self.longtaillist[idx], f"splitting {self.longtaillist[idx]} from {class_data.shape[0]}"
+                if class_data.shape[0] < self.longtaillist[idx]:
+                    logging.info(f"splitting {self.longtaillist[idx]} from {class_data.shape[0]}")
+                data.append(class_data[:self.longtaillist[idx]])
+                targets.append(class_targets[:self.longtaillist[idx]])  
+            else:
+                data.append(class_data)
+                targets.append(class_targets)
 
         if appendent is not None and len(appendent) != 0:
             appendent_data, appendent_targets = appendent
@@ -139,7 +189,7 @@ class DataManager(object):
         return DummyDataset(train_data, train_targets, trsf, self.use_path), DummyDataset(val_data, val_targets, trsf, self.use_path)
 
     def _setup_data(self, dataset_name, shuffle, seed):
-        idata = _get_idata(dataset_name)
+        idata = _get_idata(dataset_name, self.args)
         idata.download_data()
 
         # Data
@@ -159,17 +209,25 @@ class DataManager(object):
             order = np.random.permutation(len(order)).tolist()
         else:
             order = idata.class_order
+        
         self._class_order = order
+        if dataset_name != "cifar224":
+            num4class = [self.getlen(i) for i in order]
+            class2num = dict(zip(order, num4class))
+            d2 = sorted(class2num.items(), key=lambda x:x[1], reverse=True)
+            logging.info("ordering by the number of the class data")
+            logging.info(d2)
+            order = [item[0] for item in d2]
+            n_data = [item[1] for item in d2]
+            self._class_order = order
+            self.origin_num = n_data
+        
+        logging.info("---------------------------------------shuffle------------------------------------")
         logging.info(self._class_order)
 
         # Map indices
         self._train_targets = _map_new_class_index(self._train_targets, self._class_order)
         self._test_targets = _map_new_class_index(self._test_targets, self._class_order)
-
-        _class_to_label=[self._class_to_label[i] for i in self._class_order]
-        self._class_to_label = _class_to_label
-        print('After shuffle, class_to_label is: ', self._class_to_label)
-
 
     def _select(self, x, y, low_range, high_range):
         idxes = np.where(np.logical_and(y >= low_range, y < high_range))[0]
@@ -190,7 +248,7 @@ class DataManager(object):
 
     def getlen(self, index):
         y = self._train_targets
-        return np.sum(np.where(y == index))
+        return np.sum(np.where(y == index,1 , 0))
 
 
 class DummyDataset(Dataset):
@@ -217,60 +275,19 @@ class DummyDataset(Dataset):
 def _map_new_class_index(y, order):
     return np.array(list(map(lambda x: order.index(x), y)))
 
-def _get_idata(dataset_name):
-    name = dataset_name.lower()
-    if name == "cifar224":
-        return iCIFAR224()
-    elif name== "imagenetr":
-        return iImageNetR()
-    elif name=="imageneta":
-        return iImageNetA()
-    elif name=="objectnet":
-        return objectnet()
-    elif name=="cub":
-        return CUB()
-    elif name=="caltech101":
-        return Caltech101()
-    elif name=="food101":
-        return Food101()
-    elif name=="flowers":
-        return Flowers()
-    elif name=="aircraft":
-        return Aircraft()
-    elif name=="ucf101":
-        return UCF101()
-    elif name=="cars":
-        return StanfordCars()
-    elif name=="sun":
-        return SUN()
-    else:
-        raise NotImplementedError("Unknown dataset {}.".format(dataset_name))
 
-
-def _get_idata_image_only(dataset_name):
+def _get_idata(dataset_name, args=None):
     name = dataset_name.lower()
     if name == "cifar10":
         return iCIFAR10()
     elif name == "cifar100":
         return iCIFAR100()
-    elif name == "imagenet1000":
-        return iImageNet1000()
-    elif name == "imagenet100":
-        return iImageNet100()
-    elif name== "cifar224":
+    elif name == "cifar224":
         return iCIFAR224()
-    elif name== "imagenetr":
+    elif name == "imagenetr":
         return iImageNetR()
-    elif name=="imageneta":
-        return iImageNetA()
-    elif name=="cub":
-        return CUB()
-    elif name=="objectnet":
+    elif name == "objectnet":
         return objectnet()
-    elif name=="omnibenchmark":
-        return omnibenchmark()
-    elif name=="vtab":
-        return vtab()
     else:
         raise NotImplementedError("Unknown dataset {}.".format(dataset_name))
 
@@ -286,32 +303,52 @@ def pil_loader(path):
         return img.convert("RGB")
 
 
-# def accimage_loader(path):
-#     """
-#     Ref:
-#     https://pytorch.org/docs/stable/_modules/torchvision/datasets/folder.html#ImageFolder
-#     accimage is an accelerated Image loader and preprocessor leveraging Intel IPP.
-#     accimage is available on conda-forge.
-#     """
-#     import accimage
-#     try:
-#         return accimage.Image(path)
-#     except IOError:
-#         # Potentially a decoding problem, fall back to PIL.Image
-#         return pil_loader(path)
+def accimage_loader(path):
+    """
+    Ref:
+    https://pytorch.org/docs/stable/_modules/torchvision/datasets/folder.html#ImageFolder
+    accimage is an accelerated Image loader and preprocessor leveraging Intel IPP.
+    accimage is available on conda-forge.
+    """
+    import accimage
+
+    try:
+        return accimage.Image(path)
+    except IOError:
+        # Potentially a decoding problem, fall back to PIL.Image
+        return pil_loader(path)
 
 
-# def default_loader(path):
-#     """
-#     Ref:
-#     https://pytorch.org/docs/stable/_modules/torchvision/datasets/folder.html#ImageFolder
-#     """
-#     from torchvision import get_image_backend
+def default_loader(path):
+    """
+    Ref:
+    https://pytorch.org/docs/stable/_modules/torchvision/datasets/folder.html#ImageFolder
+    """
+    from torchvision import get_image_backend
 
-#     if get_image_backend() == "accimage":
-#         return accimage_loader(path)
-#     else:
-#         return pil_loader(path)
+    if get_image_backend() == "accimage":
+        return accimage_loader(path)
+    else:
+        return pil_loader(path)
+
+def get_img_num_per_cls(img_max, cls_num, imb_type, imb_factor):
+    # img_max: max number of instances for head class
+    # cls_num: number of classes
+    # imb_type: exponential is preferred
+    # imb_factor: s0/s-1
+    img_num_per_cls = []
+    if imb_type == 'exp':
+        for cls_idx in range(cls_num):
+            num = img_max * (imb_factor**(cls_idx / (cls_num - 1.0)))
+            img_num_per_cls.append(int(num))
+    elif imb_type == 'step':
+        for cls_idx in range(cls_num // 2):
+            img_num_per_cls.append(int(img_max))
+        for cls_idx in range(cls_num // 2):
+            img_num_per_cls.append(int(img_max * imb_factor))
+    else:
+        img_num_per_cls.extend([int(img_max)] * cls_num)
+    return img_num_per_cls
 
 class LaionData(Dataset):
     def __init__(self, txt_path):
